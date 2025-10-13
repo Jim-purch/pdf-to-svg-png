@@ -68,7 +68,12 @@ class PdfSvgGUI:
         self.last_svg_name = "extracted"
         self.last_rect = None  # 上次生成 SVG 的页面选区矩形
         # 批量导出选项（默认）
-        self.export_formats = {"PNG": tk.BooleanVar(value=True), "WEBP": tk.BooleanVar(value=True), "JPG": tk.BooleanVar(value=True)}
+        self.export_formats = {
+            "PNG": tk.BooleanVar(value=True),
+            "WEBP": tk.BooleanVar(value=True),
+            "JPG": tk.BooleanVar(value=True),
+            "ICO": tk.BooleanVar(value=True),  # 新增 ICO 图标格式
+        }
         # 常见尺寸（包含更小图标尺寸）
         self.export_sizes = [16, 24, 32, 48, 64, 96, 128, 256, 512, 1024]
         self.size_vars = {s: tk.BooleanVar(value=True) for s in self.export_sizes}
@@ -540,6 +545,24 @@ class PdfSvgGUI:
                     prog_bar['value'] = done
                     log(f"JPG: {jpg_path.name}")
                     exported.append(str(jpg_path))
+                if "ICO" in formats:
+                    # ICO 通常支持最大 256x256，超出尺寸跳过
+                    if w > 256 or h > 256:
+                        log(f"跳过 ICO 尺寸 {w}x{h}（ICO 最大为 256）")
+                    else:
+                        ico_path = out_path / f"{base}_{w}x{h}.ico"
+                        try:
+                            img_for_ico = img
+                            if img_for_ico.mode not in ("RGBA", "RGB", "P"):
+                                img_for_ico = img_for_ico.convert("RGBA")
+                            # 明确写入目标尺寸
+                            img_for_ico.save(ico_path, format="ICO", sizes=[(w, h)])
+                            done += 1
+                            prog_bar['value'] = done
+                            log(f"ICO: {ico_path.name}")
+                            exported.append(str(ico_path))
+                        except Exception as e:
+                            log(f"ICO 导出失败 {w}x{h}: {e}")
             except Exception as e:
                 log(f"失败: 尺寸 {target} 处理失败: {e}")
                 messagebox.showerror("导出失败", f"尺寸 {target} 处理失败: {e}")
