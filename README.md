@@ -18,6 +18,7 @@
 - 依赖包：
   - 必需：`PyMuPDF`（`pymupdf`）、`Pillow`
   - 可选：`CairoSVG`（提升 SVG 渲染质量与兼容性）
+  - 可选：`PyInstaller`（用于打包为 Windows 可执行文件）
 
 安装示例：
 ```bash
@@ -30,6 +31,12 @@ pip install cairosvg
 ```bash
 python pdf_svg_gui.py
 ```
+
+- 打包为 exe：
+  - 安装：`python -m pip install pyinstaller`
+  - 运行：`python build_exe.py`
+  - 生成：`dist/pdf_svg_gui.exe`
+  - 可选：在项目根目录放置 `app.ico`，自动作为生成 exe 的图标
 
 ## 使用指南
 1. 打开 PDF：点击工具栏中的“打开PDF”选择文件
