@@ -4,6 +4,8 @@ from pathlib import Path
 import fitz  # PyMuPDF
 from PIL import Image, ImageTk, ImageChops, ImageOps
 import io
+import re
+import xml.etree.ElementTree as ET
 from tkinter import ttk
 
 
@@ -305,6 +307,12 @@ class PdfSvgGUI:
 
             # 生成新页的 SVG（其尺寸与选区一致）
             svg = new_page.get_svg_image()
+            # 可选：去除白底背景（仅移除覆盖全画布的白色矩形），保持其它元素
+            if self.remove_bg_var.get():
+                try:
+                    svg = self._remove_white_background_in_svg(svg, (float(rect.width), float(rect.height)))
+                except Exception:
+                    pass
         except Exception as e:
             messagebox.showerror("导出失败", f"生成裁剪 SVG 时出错: {e}")
             return
@@ -328,6 +336,83 @@ class PdfSvgGUI:
         except Exception:
             self.last_svg_name = "extracted"
         messagebox.showinfo("完成", f"已导出 SVG: {out}")
+
+    def _remove_white_background_in_svg(self, svg: str, size: tuple) -> str:
+        """
+        移除/透明化覆盖整张画布的白色矩形背景：
+        - 仅处理 <rect>，要求尺寸接近画布大小、位置接近 (0,0)
+        - 白色判断：#fff/#ffffff/white/rgb(255,255,255)
+        若解析失败，回退到正则删除首个白底 rect。
+        """
+        def _parse_float(val: str) -> float:
+            try:
+                m = re.search(r"[-+]?[0-9]*\.?[0-9]+", str(val))
+                return float(m.group(0)) if m else 0.0
+            except Exception:
+                return 0.0
+
+        def _is_white(fill: str) -> bool:
+            if not fill:
+                return False
+            f = fill.strip().lower().replace(" ", "")
+            if f in {"#fff", "#ffffff", "white"}:
+                return True
+            return bool(re.match(r"rgb\(\s*255\s*,\s*255\s*,\s*255\s*\)", f))
+
+        try:
+            root = ET.fromstring(svg)
+            canvas_w, canvas_h = size
+            tol = 1.0  # 允许 1px 误差
+            # 遍历所有 rect，找到符合条件者并透明化
+            removed = False
+            for parent in root.iter():
+                for child in list(parent):
+                    tag = child.tag
+                    if isinstance(tag, str) and tag.endswith("rect"):
+                        fill = child.attrib.get("fill")
+                        style = child.attrib.get("style", "")
+                        # 从 style 中提取 fill
+                        if not fill and style:
+                            for part in style.split(";"):
+                                if ":" in part:
+                                    k, v = part.split(":", 1)
+                                    if k.strip().lower() == "fill":
+                                        fill = v.strip()
+                                        break
+                        # 白色判断
+                        if not _is_white(fill):
+                            continue
+                        # 尺寸与位置判断
+                        w = _parse_float(child.attrib.get("width", canvas_w))
+                        h = _parse_float(child.attrib.get("height", canvas_h))
+                        x = _parse_float(child.attrib.get("x", 0))
+                        y = _parse_float(child.attrib.get("y", 0))
+                        if abs(w - canvas_w) <= tol and abs(h - canvas_h) <= tol and abs(x) <= tol and abs(y) <= tol:
+                            # 透明化而不是删除，避免影响布局
+                            child.attrib["fill"] = "none"
+                            # 更新 style：移除 fill，加入 fill:none;fill-opacity:0
+                            styles = {}
+                            if style:
+                                for part in style.split(";"):
+                                    if ":" in part:
+                                        k, v = part.split(":", 1)
+                                        styles[k.strip().lower()] = v.strip()
+                            styles.pop("fill", None)
+                            styles["fill"] = "none"
+                            styles["fill-opacity"] = "0"
+                            child.attrib["style"] = ";".join(f"{k}:{v}" for k, v in styles.items())
+                            removed = True
+            if removed:
+                return ET.tostring(root, encoding="unicode")
+        except Exception:
+            pass
+
+        # 回退：正则替换首个匹配的白底 rect
+        try:
+            pattern = r"<rect[^>]*?(?:fill\s*=\s*\"(?:#fff|#ffffff|white)\"|style\s*=\s*\"[^\"]*fill\s*:\s*(?:#fff|#ffffff|white|rgb\(\s*255\s*,\s*255\s*,\s*255\s*\)))[^>]*?>"
+            return re.sub(pattern, "", svg, count=1, flags=re.IGNORECASE)
+        except Exception:
+            return svg
 
     def batch_export_images(self):
         """
