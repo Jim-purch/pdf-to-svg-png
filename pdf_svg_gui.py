@@ -339,10 +339,11 @@ class PdfSvgGUI:
 
     def _remove_white_background_in_svg(self, svg: str, size: tuple) -> str:
         """
-        移除/透明化覆盖整张画布的白色矩形背景：
-        - 仅处理 <rect>，要求尺寸接近画布大小、位置接近 (0,0)
-        - 白色判断：#fff/#ffffff/white/rgb(255,255,255)
-        若解析失败，回退到正则删除首个白底 rect。
+        移除/透明化覆盖整张画布的白色背景：
+        - 处理 <rect>/<polygon>/<path> 中的白底图形
+        - 白色判断：white/#fff/#ffffff/#fefefe 等近白、rgb(>=250,>=250,>=250)
+        - 尺寸判断：接近画布尺寸或占比 >= 95%
+        若解析失败，回退到更强的正则删除常见白底元素。
         """
         def _parse_float(val: str) -> float:
             try:
@@ -351,24 +352,77 @@ class PdfSvgGUI:
             except Exception:
                 return 0.0
 
+        def _hex_to_rgb(hexstr: str):
+            h = hexstr.lstrip('#')
+            if len(h) == 3:
+                h = ''.join(ch*2 for ch in h)
+            if len(h) != 6:
+                return None
+            try:
+                return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+            except Exception:
+                return None
+
+        def _parse_rgb(fill: str):
+            f = fill.strip().lower()
+            m = re.match(r"rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*[\d.]+\s*)?\)", f)
+            if m:
+                vals = []
+                for g in m.groups()[:3]:
+                    if '%' in g:
+                        try:
+                            vals.append(int(round(float(g.strip('%')) * 2.55)))
+                        except Exception:
+                            vals.append(255)
+                    else:
+                        try:
+                            vals.append(int(round(float(g))))
+                        except Exception:
+                            vals.append(255)
+                return tuple(vals)
+            return None
+
         def _is_white(fill: str) -> bool:
             if not fill:
                 return False
             f = fill.strip().lower().replace(" ", "")
-            if f in {"#fff", "#ffffff", "white"}:
+            if f == "white":
                 return True
-            return bool(re.match(r"rgb\(\s*255\s*,\s*255\s*,\s*255\s*\)", f))
+            if f.startswith('#'):
+                rgb = _hex_to_rgb(f)
+                if rgb:
+                    return all(c >= 250 for c in rgb)
+                return False
+            rgb = _parse_rgb(f)
+            if rgb:
+                return all(c >= 250 for c in rgb)
+            return False
+
+        def _ensure_transparent(child, style: str):
+            # 透明化而不是删除，避免影响布局
+            child.attrib["fill"] = "none"
+            styles = {}
+            if style:
+                for part in style.split(";"):
+                    if ":" in part:
+                        k, v = part.split(":", 1)
+                        styles[k.strip().lower()] = v.strip()
+            styles.pop("fill", None)
+            styles["fill"] = "none"
+            styles["fill-opacity"] = "0"
+            child.attrib["style"] = ";".join(f"{k}:{v}" for k, v in styles.items())
 
         try:
             root = ET.fromstring(svg)
             canvas_w, canvas_h = size
-            tol = 1.0  # 允许 1px 误差
-            # 遍历所有 rect，找到符合条件者并透明化
+            tol = max(1.0, 0.02 * max(canvas_w, canvas_h))  # 2% 容差
+            min_ratio = 0.95
+            # 遍历候选元素，找到符合条件者并透明化
             removed = False
             for parent in root.iter():
                 for child in list(parent):
                     tag = child.tag
-                    if isinstance(tag, str) and tag.endswith("rect"):
+                    if isinstance(tag, str) and (tag.endswith("rect") or tag.endswith("polygon") or tag.endswith("path")):
                         fill = child.attrib.get("fill")
                         style = child.attrib.get("style", "")
                         # 从 style 中提取 fill
@@ -379,37 +433,71 @@ class PdfSvgGUI:
                                     if k.strip().lower() == "fill":
                                         fill = v.strip()
                                         break
-                        # 白色判断
                         if not _is_white(fill):
                             continue
-                        # 尺寸与位置判断
-                        w = _parse_float(child.attrib.get("width", canvas_w))
-                        h = _parse_float(child.attrib.get("height", canvas_h))
-                        x = _parse_float(child.attrib.get("x", 0))
-                        y = _parse_float(child.attrib.get("y", 0))
-                        if abs(w - canvas_w) <= tol and abs(h - canvas_h) <= tol and abs(x) <= tol and abs(y) <= tol:
-                            # 透明化而不是删除，避免影响布局
-                            child.attrib["fill"] = "none"
-                            # 更新 style：移除 fill，加入 fill:none;fill-opacity:0
-                            styles = {}
-                            if style:
-                                for part in style.split(";"):
-                                    if ":" in part:
-                                        k, v = part.split(":", 1)
-                                        styles[k.strip().lower()] = v.strip()
-                            styles.pop("fill", None)
-                            styles["fill"] = "none"
-                            styles["fill-opacity"] = "0"
-                            child.attrib["style"] = ";".join(f"{k}:{v}" for k, v in styles.items())
+                        # stroke 检查：若存在描边，减少误伤
+                        stroke = child.attrib.get("stroke") or ""
+                        stroke_in_style = False
+                        if style:
+                            for part in style.split(";"):
+                                if ":" in part:
+                                    k, v = part.split(":", 1)
+                                    if k.strip().lower() == "stroke" and v.strip().lower() not in {"none", ""}:
+                                        stroke_in_style = True
+                                        break
+                        if stroke and stroke.lower() not in {"none", ""}:
+                            continue
+                        if stroke_in_style:
+                            continue
+
+                        fits_canvas = False
+                        if tag.endswith("rect"):
+                            w = _parse_float(child.attrib.get("width", canvas_w))
+                            h = _parse_float(child.attrib.get("height", canvas_h))
+                            x = _parse_float(child.attrib.get("x", 0))
+                            y = _parse_float(child.attrib.get("y", 0))
+                            if (abs(x) <= tol and abs(y) <= tol) and (w >= min_ratio * canvas_w and h >= min_ratio * canvas_h):
+                                fits_canvas = True
+                        elif tag.endswith("polygon"):
+                            pts = child.attrib.get("points", "")
+                            nums = re.findall(r"[-+]?\d*\.?\d+(?:e[-+]?\d+)?", pts)
+                            coords = [float(n) for n in nums]
+                            if len(coords) >= 8:
+                                xs = coords[0::2]
+                                ys = coords[1::2]
+                                minx, maxx = min(xs), max(xs)
+                                miny, maxy = min(ys), max(ys)
+                                if abs(minx) <= tol and abs(miny) <= tol and (maxx >= min_ratio * canvas_w) and (maxy >= min_ratio * canvas_h):
+                                    fits_canvas = True
+                        elif tag.endswith("path"):
+                            d = child.attrib.get("d", "")
+                            nums = re.findall(r"[-+]?\d*\.?\d+(?:e[-+]?\d+)?", d)
+                            coords = [float(n) for n in nums]
+                            if len(coords) >= 8:
+                                xs = coords[0::2]
+                                ys = coords[1::2]
+                                minx, maxx = min(xs), max(xs)
+                                miny, maxy = min(ys), max(ys)
+                                if abs(minx) <= tol and abs(miny) <= tol and (maxx >= min_ratio * canvas_w) and (maxy >= min_ratio * canvas_h):
+                                    fits_canvas = True
+
+                        if fits_canvas:
+                            _ensure_transparent(child, style)
                             removed = True
             if removed:
                 return ET.tostring(root, encoding="unicode")
         except Exception:
             pass
 
-        # 回退：正则替换首个匹配的白底 rect
+        # 回退：正则替换首个匹配的白底背景（rect/path/polygon）
         try:
-            pattern = r"<rect[^>]*?(?:fill\s*=\s*\"(?:#fff|#ffffff|white)\"|style\s*=\s*\"[^\"]*fill\s*:\s*(?:#fff|#ffffff|white|rgb\(\s*255\s*,\s*255\s*,\s*255\s*\)))[^>]*?>"
+            color_pat = r"(?:#(?:fff|ffffff|fefefe)|white|rgb\(\s*25[0-9]\s*,\s*25[0-9]\s*,\s*25[0-9]\s*\))"
+            style_pat = rf"style\s*=\s*\"[^\"]*fill\s*:\s*{color_pat}[^\"]*\""
+            fill_pat = rf"fill\s*=\s*\"{color_pat}\""
+            rect_pat = rf"<rect[^>]*?(?:{fill_pat}|{style_pat})[^>]*?>"
+            poly_pat = rf"<polygon[^>]*?(?:{fill_pat}|{style_pat})[^>]*?>"
+            path_pat = rf"<path[^>]*?(?:{fill_pat}|{style_pat})[^>]*?>"
+            pattern = rf"({rect_pat}|{poly_pat}|{path_pat})"
             return re.sub(pattern, "", svg, count=1, flags=re.IGNORECASE)
         except Exception:
             return svg
