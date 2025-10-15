@@ -2,7 +2,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 from pathlib import Path
 import fitz  # PyMuPDF
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageChops, ImageOps
 import io
 from tkinter import ttk
 
@@ -35,6 +35,9 @@ class PdfSvgGUI:
         tk.Button(toolbar, text="导出SVG", command=self.export_svg).pack(side=tk.LEFT, padx=8)
         tk.Button(toolbar, text="导出PNG", command=self.export_png).pack(side=tk.LEFT)
         tk.Button(toolbar, text="批量导出图片", command=self.batch_export_images).pack(side=tk.LEFT, padx=8)
+        # 去除白底背景开关
+        self.remove_bg_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(toolbar, text="去除白底背景", variable=self.remove_bg_var).pack(side=tk.LEFT, padx=8)
 
         self.page_label = tk.Label(toolbar, text="")
         self.page_label.pack(side=tk.RIGHT, padx=8)
@@ -262,8 +265,29 @@ class PdfSvgGUI:
         out = filedialog.asksaveasfilename(defaultextension=".png", filetypes=[("PNG", "*.png")], initialfile="extracted.png")
         if not out:
             return
-        pix.save(out)
+        img = Image.frombytes("RGBA", [pix.width, pix.height], pix.samples)
+        if self.remove_bg_var.get():
+            try:
+                img = self._remove_white_background(img)
+            except Exception:
+                pass
+        img.save(out, format="PNG")
         messagebox.showinfo("完成", f"已导出 PNG: {out}")
+
+    def _remove_white_background(self, img: Image.Image, threshold: int = 250) -> Image.Image:
+        """
+        将近白像素（R、G、B 都 >= threshold）透明化，并与原 Alpha 叠乘。
+        """
+        img = img.convert("RGBA")
+        r, g, b, a = img.split()
+        mask_r = r.point(lambda v: 255 if v >= threshold else 0)
+        mask_g = g.point(lambda v: 255 if v >= threshold else 0)
+        mask_b = b.point(lambda v: 255 if v >= threshold else 0)
+        white_mask = ImageChops.multiply(mask_r, ImageChops.multiply(mask_g, mask_b))
+        alpha_from_white = ImageOps.invert(white_mask)  # 白色->0，非白->255
+        new_alpha = ImageChops.multiply(a, alpha_from_white)
+        img.putalpha(new_alpha)
+        return img
 
     def export_svg(self):
         if not self.doc:
@@ -513,6 +537,14 @@ class PdfSvgGUI:
                         tmp_doc.close()
                     except Exception:
                         pass
+                # 去除白底（可选），然后按目标尺寸确保尺寸一致
+                if self.remove_bg_var.get():
+                    try:
+                        img = self._remove_white_background(img)
+                    except Exception:
+                        pass
+                if img.size != (w, h):
+                    img = img.resize((w, h), Image.LANCZOS)
                 if "PNG" in formats:
                     png_path = out_path / f"{base}_{w}x{h}.png"
                     buf = io.BytesIO()
@@ -555,6 +587,12 @@ class PdfSvgGUI:
                             img_for_ico = img
                             if img_for_ico.mode not in ("RGBA", "RGB", "P"):
                                 img_for_ico = img_for_ico.convert("RGBA")
+                            # 去除白底（可选）
+                            if self.remove_bg_var.get():
+                                try:
+                                    img_for_ico = self._remove_white_background(img_for_ico)
+                                except Exception:
+                                    pass
                             # 明确写入目标尺寸
                             img_for_ico.save(ico_path, format="ICO", sizes=[(w, h)])
                             done += 1
@@ -583,6 +621,11 @@ class PdfSvgGUI:
                     img = Image.frombytes("RGBA", [pix.width, pix.height], pix.samples)
                     try:
                         tmp_doc.close()
+                    except Exception:
+                        pass
+                if self.remove_bg_var.get():
+                    try:
+                        img = self._remove_white_background(img)
                     except Exception:
                         pass
                 orig_png = out_path / f"{base}_{orig_w}x{orig_h}.png"
